@@ -1,6 +1,14 @@
+# 运行环境：python 3.9
+# 提前安装的库：
+# - torch
+# - d2l
+# - openpyxl
+# - os
 import random
 import torch
 from d2l import torch as d2l
+import openpyxl
+import os
 
 # 构造数据集
 def synthetic_data(w, b, num_examples):
@@ -52,12 +60,37 @@ lr = 0.03
 num_epochs = 3
 net = linreg
 loss = squared_loss
+param_logs = []
 
 for epoch in range(num_epochs):
     for X, y in data_iter(batch_size, features, labels):
         l = loss(net(X, w, b), y)
         l.sum().backward()
         sgd([w, b], lr, batch_size)
+        param_logs.append([epoch + 1, len(param_logs) + 1, float(w[0][0]), float(w[1][0]), float(b[0])])
     with torch.no_grad():
         train_l = loss(net(features, w, b), labels)
         print(f'epoch {epoch + 1}, loss {float(train_l.mean()):f}')
+
+def save_datas(features, labels, param_logs):
+    wb = openpyxl.Workbook()
+    ws_features = wb.active
+    ws_features.title = "features"
+    ws_labels = wb.create_sheet("labels")
+    ws_params = wb.create_sheet("params")
+    ws_features.append(["x1", "x2"])
+    for row in features.tolist():
+        ws_features.append(row)
+    ws_labels.append(["y"])
+    for v in labels.view(-1).tolist():
+        ws_labels.append([v])
+    ws_params.append(["epoch", "step", "w1", "w2", "b"])
+    for log in param_logs:
+        ws_params.append(log)
+    parent_dir = os.path.dirname(os.path.dirname(__file__))
+    output_dir = os.path.join(parent_dir, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    save_path = os.path.join(output_dir, "video021_linear_regression_log.xlsx")
+    wb.save(save_path)
+
+save_datas(features, labels, param_logs)
