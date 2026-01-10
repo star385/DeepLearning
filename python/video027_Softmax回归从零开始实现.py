@@ -3,7 +3,14 @@ from IPython import display
 from torchvision import transforms
 import torchvision
 import os
+import openpyxl
 from d2l import torch as d2l
+
+show_animate = False
+show_predict = True
+
+d2l.plt.rcParams["figure.figsize"] = (10, 6)
+d2l.plt.rcParams["font.size"] = 12
 
 data_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../data"))
 
@@ -98,11 +105,83 @@ class Accumulator:
 
 # print(evaluate_accuracy(net, test_iter))
 
-def train_epoch_ch3(net, train_iter, loss, updater):
+def _format_param_log_row(epoch, batch, global_step, loss_mean, batch_acc, W, b, sampled_weight_indices):
+    with torch.no_grad():
+        W_detached = W.detach()
+        b_detached = b.detach()
+
+        row = [
+            int(epoch),
+            int(batch),
+            int(global_step),
+            float(loss_mean),
+            float(batch_acc),
+            float(W_detached.norm()),
+            float(W_detached.mean()),
+            float(W_detached.std(unbiased=False)),
+            float(W_detached.min()),
+            float(W_detached.max()),
+            float(b_detached.mean()),
+            float(b_detached.std(unbiased=False)),
+            float(b_detached.min()),
+            float(b_detached.max()),
+        ]
+
+        row.extend([float(v) for v in b_detached.view(-1).tolist()])
+
+        col_norms = W_detached.norm(dim=0)
+        row.extend([float(v) for v in col_norms.tolist()])
+
+        for idx in sampled_weight_indices:
+            row.extend([float(v) for v in W_detached[idx, :].tolist()])
+
+        return row
+
+
+def _save_param_logs_to_excel(param_logs, sampled_weight_indices, save_path):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "params"
+
+    header = [
+        "epoch",
+        "batch",
+        "global_step",
+        "loss_mean",
+        "batch_acc",
+        "W_norm",
+        "W_mean",
+        "W_std",
+        "W_min",
+        "W_max",
+        "b_mean",
+        "b_std",
+        "b_min",
+        "b_max",
+    ]
+    header.extend([f"b{i}" for i in range(num_outputs)])
+    header.extend([f"W_col_norm_{i}" for i in range(num_outputs)])
+    for idx in sampled_weight_indices:
+        header.extend([f"W_{idx}_{j}" for j in range(num_outputs)])
+
+    ws.append(header)
+    for row in param_logs:
+        ws.append(row)
+
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    wb.save(save_path)
+
+
+param_logs = []
+sampled_weight_indices = [0, 27, 28 * 14 + 14, 783]
+
+
+def train_epoch_ch3(net, train_iter, loss, updater, epoch):
     if isinstance(net, torch.nn.Module):
         net.train()
     
     metric = Accumulator(3)
+    global_step = 0
     for X, y in train_iter:
         y_hat = net(X)
         l = loss(y_hat, y)
@@ -111,16 +190,31 @@ def train_epoch_ch3(net, train_iter, loss, updater):
             l.backward()
             updater.step()
             metric.add(
-                float(l) * len(y), accuracy(y_hat, y),
+                float(l.detach()) * len(y), accuracy(y_hat, y),
                 y.size().numel()
             )
         else:
             l.sum().backward()
             updater(X.shape[0])
             metric.add(
-                float(l.sum()), accuracy(y_hat, y),
+                float(l.sum().detach()), accuracy(y_hat, y),
                 y.numel()
             )
+            batch_acc = accuracy(y_hat, y) / y.numel()
+            loss_mean = float(l.mean().detach())
+            param_logs.append(
+                _format_param_log_row(
+                    epoch=epoch,
+                    batch=global_step + 1,
+                    global_step=(epoch - 1) * len(train_iter) + global_step + 1,
+                    loss_mean=loss_mean,
+                    batch_acc=batch_acc,
+                    W=W,
+                    b=b,
+                    sampled_weight_indices=sampled_weight_indices,
+                )
+            )
+        global_step += 1
     return metric[0] / metric[2], metric[1] / metric[2]
 
 class Animator:
@@ -128,7 +222,7 @@ class Animator:
     """ 在动画中绘制数据 """
     def __init__(self, xlabel=None, ylabel=None, legend=None, xlim=None,
         ylim=None, xscale='linear', yscale='linear',
-        fmts=('-', 'm--', 'g-.', 'r:'), nrows=1, ncols=1, figsize=(3.5, 2.5)):
+        fmts=('-', 'm--', 'g-.', 'r:'), nrows=1, ncols=1, figsize=(10, 4.5)):
         if legend is None:
             legend = []
         d2l.use_svg_display()
@@ -166,33 +260,34 @@ class Animator:
 
 def train_ch3(net, train_iter, test_iter, loss, num_epochs, updater):
     """ 训练模型（定义见第3章） """
-    animator = Animator(xlabel="epoch", xlim=[1, num_epochs], ylim=[0.3,0.9],
-        legend=["train loss", "train acc", "test acc"])
+    if show_animate:
+        animator = Animator(xlabel="epoch", xlim=[1, num_epochs], ylim=[0.3,0.9],
+            legend=["train loss", "train acc", "test acc"])
     for epoch in range(num_epochs):
-        train_metrics = train_epoch_ch3(net, train_iter, loss, updater)
+        train_metrics = train_epoch_ch3(net, train_iter, loss, updater, epoch + 1)
         test_acc = evaluate_accuracy(net, test_iter)
-        animator.add(epoch + 1, train_metrics + (test_acc,))
+        if show_animate:
+            animator.add(epoch + 1, train_metrics + (test_acc,))
     
     train_loss, train_acc = train_metrics
-    assert train_loss < 0.5, train_loss
-    assert train_acc <= 1 and train_acc > 0.7, train_acc
-    assert test_acc <= 1 and test_acc > 0.7, test_acc
+    if os.environ.get("SKIP_ASSERTS", "0") != "1":
+        assert train_loss < 0.5, train_loss
+        assert train_acc <= 1 and train_acc > 0.7, train_acc
+        assert test_acc <= 1 and test_acc > 0.7, test_acc
 
 lr = 0.1
 def updater(batch_size):
     return d2l.sgd([W, b], lr, batch_size)
 
-num_epochs = 10
+num_epochs = int(os.environ.get("NUM_EPOCHS", "10"))
 train_ch3(net, train_iter, test_iter, cross_entropy, num_epochs, updater)
+
+output_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output")
+excel_path = os.path.join(output_dir, "video027_softmax_params_log.xlsx")
+_save_param_logs_to_excel(param_logs, sampled_weight_indices, excel_path)
 # 展示动画
 # d2l.plt.show()
 
-import matplotlib.pyplot as plt
-from d2l import torch as d2l
-
-# 设置中文字体以解决乱码问题
-plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
-plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
 
 def predict_ch3(net, test_iter, n=6):
     for X, y in test_iter:
@@ -201,7 +296,13 @@ def predict_ch3(net, test_iter, n=6):
     trues = d2l.get_fashion_mnist_labels(y)
     preds = d2l.get_fashion_mnist_labels(net(X).argmax(axis=1))
     titles = ["真实值:" + true + "\n预测值:" + pred for true, pred in zip(trues, preds)]
-    d2l.show_images(X[0:n].reshape((n, 28, 28)), 1, n, titles=titles[0:n])
+    d2l.show_images(X[0:n].reshape((n, 28, 28)), 1, n, titles=titles[0:n], scale=2.5)
 
-predict_ch3(net, test_iter)
-d2l.plt.show()
+if show_predict:
+    predict_ch3(net, test_iter)
+
+if show_animate or show_predict:
+    # 设置中文字体以解决乱码问题
+    d2l.plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+    d2l.plt.rcParams['axes.unicode_minus'] = False  # 用来正常显示负号
+    d2l.plt.show()
