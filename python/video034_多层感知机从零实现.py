@@ -25,6 +25,7 @@ def relu(X):
 
 def net(X):
     X = X.reshape((-1, num_inputs))
+    # @是一个什么乘法？
     H = relu(X @ W1 + b1)
     return (H @ W2 + b2)
 
